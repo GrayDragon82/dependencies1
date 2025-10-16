@@ -1,0 +1,27 @@
+// Package simple_di provides a lightweight dependency orchestration container.
+//
+// The package focuses on deferred initialization and deterministic initialization order.
+// Instead of registering concrete instances, you register Dependency wrappers which
+// implement a lifecycle API (Init/Get/Close) and declare which other dependencies they
+// reference (GetRefs). The container computes a topological order and initializes
+// dependencies respecting declared references, detects cycles and can close dependencies
+// in reverse order.
+//
+// Two main dependency models are provided:
+//
+//  1. NamedDependency — register dependencies with explicit names (DepName).
+//     Each NamedDependency declares a list of DepName keys it depends on.
+//
+//  2. TypedDependency (generic) — register dependencies by Go type; the container
+//     uses the formatted type string as the key (fmt.Sprintf("%T", zero)).
+//     Utility functions `ReduceDependencies` and `MustReduceDependencies` allow
+//     composing a struct of required typed dependencies.
+//
+// Example usage
+//
+//  deps := New()
+//  deps.Add(NewNamedDependency("cfg", nil, func(ctx context.Context, c *Container) (any, error) { ... }, nil))
+//  deps.Init(context.Background())
+//  defer deps.Close(context.Background())
+//
+// For documentation and examples, see README.md.

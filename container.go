@@ -1,4 +1,4 @@
-// Package main provides dependency management functionality.
+// Package simple_di provides dependency management functionality.
 //
 // The package implements a simple dependency container that can store and retrieve
 // objects implementing the Nameable interface. Dependencies can be accessed either
@@ -29,7 +29,7 @@
 // Thread Safety: The implementation is not concurrency-safe and should be
 // protected by appropriate synchronization mechanisms if used in concurrent
 // environments.
-package main
+package simple_di
 
 import (
 	"context"
@@ -37,25 +37,25 @@ import (
 	"reflect"
 )
 
-// Dependencies holds a map of dependency objects implementing Dep
-type Dependencies struct {
-	deps map[string]Dep
+// Container holds a map of dependency objects implementing Dep
+type Container struct {
+	deps map[DepName]Dependency
 	// lastOrder holds the last successful initialization order so Close can
 	// reuse it without recomputing the topological order.
-	lastOrder []string
+	lastOrder []DepName
 }
 
-// NewDependencies creates a new Dependencies instance
-func NewDependencies() *Dependencies {
-	return &Dependencies{
-		deps: make(map[string]Dep),
+// New creates a new Dependencies instance
+func New() *Container {
+	return &Container{
+		deps: make(map[DepName]Dependency),
 	}
 }
 
 // Add stores one or more dependencies. Each dependency is stored by its
 // GetName() and by its concrete type key. Each value must be a pointer;
 // passing a non-pointer will cause a panic.
-func (d *Dependencies) Add(values ...Dep) {
+func (d *Container) Add(values ...Dependency) {
 	for _, value := range values {
 		rv := reflect.ValueOf(value)
 		if rv.Kind() != reflect.Ptr {
@@ -66,9 +66,9 @@ func (d *Dependencies) Add(values ...Dep) {
 }
 
 // GetByType retrieves a dependency by its type T
-func GetByType[T any](d *Dependencies) (T, bool) {
+func GetByType[T any](d *Container) (T, bool) {
 	var zero T
-	typeKey := fmt.Sprintf("%T", zero)
+	typeKey := DepName(fmt.Sprintf("%T", zero))
 	if value, exists := d.Get(typeKey); exists {
 		return value.(T), true
 	}
@@ -76,7 +76,7 @@ func GetByType[T any](d *Dependencies) (T, bool) {
 }
 
 // Get retrieves a dependency by key and returns the prepared instance (Dep.Get()).
-func (d *Dependencies) Get(key string) (any, bool) {
+func (d *Container) Get(key DepName) (any, bool) {
 	dep, exists := d.deps[key]
 	if !exists {
 		return nil, false
@@ -84,13 +84,13 @@ func (d *Dependencies) Get(key string) (any, bool) {
 	return dep.Get(), true
 }
 
-func ReduceDependencies[R any](deps *Dependencies) *R {
+func ReduceDependencies[R any](deps *Container) *R {
 	rDeps := new(R)
 	t := reflect.TypeOf(rDeps)
 	v := reflect.ValueOf(rDeps)
 	for i := 0; i < t.Elem().NumField(); i++ {
 		key := DepName(t.Elem().Field(i).Type.String())
-		val, found := deps.Get(string(key))
+		val, found := deps.Get(key)
 		if found {
 			v.Elem().Field(i).Set(reflect.ValueOf(val))
 		}
@@ -98,13 +98,13 @@ func ReduceDependencies[R any](deps *Dependencies) *R {
 	return rDeps
 }
 
-func MustReduceDependencies[R any](deps *Dependencies) *R {
+func MustReduceDependencies[R any](deps *Container) *R {
 	rDeps := new(R)
 	t := reflect.TypeOf(rDeps)
 	v := reflect.ValueOf(rDeps)
 	for i := 0; i < t.Elem().NumField(); i++ {
 		key := DepName(t.Elem().Field(i).Type.String())
-		val, found := deps.Get(string(key))
+		val, found := deps.Get(key)
 		if !found {
 			panic(fmt.Sprintf("MustReduceDependencies: missing dependency %s", key))
 		}
@@ -117,13 +117,13 @@ func MustReduceDependencies[R any](deps *Dependencies) *R {
 // their GetRefs() requirements (dependencies are initialized before
 // dependents). If initialization of any dependency fails, already
 // initialized dependencies are closed in reverse order.
-func (d *Dependencies) Init(ctx context.Context) error {
+func (d *Container) Init(ctx context.Context) error {
 	order, err := d.topoOrder()
 	if err != nil {
 		return err
 	}
 
-	initialized := make([]string, 0, len(order))
+	initialized := make([]DepName, 0, len(order))
 	for _, name := range order {
 		dep := d.deps[name]
 		if err := dep.Init(ctx, d); err != nil {
@@ -141,8 +141,8 @@ func (d *Dependencies) Init(ctx context.Context) error {
 }
 
 // Close closes all dependencies in reverse initialization order.
-func (d *Dependencies) Close(ctx context.Context) error {
-	var order []string
+func (d *Container) Close(ctx context.Context) error {
+	var order []DepName
 	if len(d.lastOrder) > 0 {
 		order = d.lastOrder
 	} else {
@@ -166,14 +166,14 @@ func (d *Dependencies) Close(ctx context.Context) error {
 
 // topoOrder performs a topological sort of dependencies based on GetRefs.
 // Returns an order where dependencies appear before dependents.
-func (d *Dependencies) topoOrder() ([]string, error) {
+func (d *Container) topoOrder() ([]DepName, error) {
 	// build adjacency using deps map
 	// states: 0=unvisited,1=visiting,2=done
-	state := make(map[string]int)
-	var order []string
+	state := make(map[DepName]int)
+	var order []DepName
 
-	var visit func(string) error
-	visit = func(n string) error {
+	var visit func(DepName) error
+	visit = func(n DepName) error {
 		if s, ok := state[n]; ok {
 			if s == 1 {
 				return fmt.Errorf("cycle detected at %s", n)
