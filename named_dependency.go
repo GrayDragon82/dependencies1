@@ -12,7 +12,7 @@ type NamedDependency struct {
 	instance any
 	refs     []DepName
 	mu       sync.RWMutex
-	onInit   func(ctx context.Context, deps *Container) (any, error)
+	onInit   func(ctx context.Context, deps DependenciesStore) (any, error)
 	onClose  func(ctx context.Context) error
 }
 
@@ -21,13 +21,13 @@ type NamedDependency struct {
 func NewNamedDependency(
 	name DepName,
 	refs []DepName,
-	onInit func(ctx context.Context, deps *Container) (any, error),
+	onInit func(ctx context.Context, deps DependenciesStore) (any, error),
 	onClose func(ctx context.Context) error,
 ) Dependency {
 	return &NamedDependency{name: name, refs: refs, onInit: onInit, onClose: onClose}
 }
 
-func (n *NamedDependency) Init(ctx context.Context, deps *Container) error {
+func (n *NamedDependency) Init(ctx context.Context, deps DependenciesStore) error {
 	if n.onInit != nil {
 		inst, err := n.onInit(ctx, deps)
 		if err != nil {
@@ -40,16 +40,14 @@ func (n *NamedDependency) Init(ctx context.Context, deps *Container) error {
 	return nil
 }
 
-func (n *NamedDependency) GetName() DepName { return n.name }
+func (n *NamedDependency) Name() DepName { return n.name }
 
-func (n *NamedDependency) GetRefs() []DepName {
+func (n *NamedDependency) Refs() []DepName {
 	if n.refs == nil {
 		return nil
 	}
 	out := make([]DepName, 0, len(n.refs))
-	for _, r := range n.refs {
-		out = append(out, r)
-	}
+	out = append(out, n.refs...)
 	return out
 }
 

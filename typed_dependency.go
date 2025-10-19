@@ -56,7 +56,7 @@ func NewSimpleDependency[T any](onInit func(ctx context.Context) (T, error), onC
 	)
 }
 
-func (b *TypedDependency[T, R]) Init(ctx context.Context, deps *Container) error {
+func (b *TypedDependency[T, R]) Init(ctx context.Context, deps DependenciesStore) error {
 	rDeps := MustReduceDependencies[R](deps)
 	inst, err := b.onInit(ctx, rDeps)
 	if err != nil {
@@ -68,18 +68,16 @@ func (b *TypedDependency[T, R]) Init(ctx context.Context, deps *Container) error
 	return nil
 }
 
-func (b *TypedDependency[T, R]) GetName() DepName { return DepName(b.name) }
+func (b *TypedDependency[T, R]) Name() DepName { return DepName(b.name) }
 
-// GetRefs returns the field names of the refs struct as dependency keys.
-func (b *TypedDependency[T, R]) GetRefs() []DepName {
+// Refs returns the field names of the refs struct as dependency keys.
+func (b *TypedDependency[T, R]) Refs() []DepName {
 	if len(b.refsKeys) == 0 {
 		return nil
 	}
 	// return a copy to avoid external mutation
-	out := make([]DepName, len(b.refsKeys))
-	for i, k := range b.refsKeys {
-		out[i] = k
-	}
+	out := make([]DepName, 0, len(b.refsKeys))
+	out = append(out, b.refsKeys...)
 	return out
 }
 

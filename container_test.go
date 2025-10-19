@@ -48,12 +48,12 @@ type testDepA struct {
 	instance any
 }
 
-func (t *testDepA) Init(ctx context.Context, deps *Container) error {
+func (t *testDepA) Init(ctx context.Context, deps DependenciesStore) error {
 	t.instance = &A{}
 	return nil
 }
-func (t *testDepA) GetName() DepName                { return "a" }
-func (t *testDepA) GetRefs() []DepName              { return nil }
+func (t *testDepA) Name() DepName                   { return "a" }
+func (t *testDepA) Refs() []DepName                 { return nil }
 func (t *testDepA) Get() any                        { return t.instance }
 func (t *testDepA) Close(ctx context.Context) error { t.instance = nil; return nil }
 
@@ -61,9 +61,9 @@ type testDepB struct {
 	instance any
 }
 
-func (t *testDepB) Init(ctx context.Context, deps *Container) error {
+func (t *testDepB) Init(ctx context.Context, deps DependenciesStore) error {
 	// use referenced dependency "c" to build own instance
-	if cInst, ok := deps.Get("c"); ok && cInst != nil {
+	if cInst, err := deps.Get("c"); err == nil && cInst != nil {
 		if cPtr, ok := cInst.(*C); ok {
 			t.instance = &B{c: cPtr}
 			return nil
@@ -72,50 +72,50 @@ func (t *testDepB) Init(ctx context.Context, deps *Container) error {
 	t.instance = &B{c: nil}
 	return nil
 }
-func (t *testDepB) GetName() DepName                { return "b" }
-func (t *testDepB) GetRefs() []DepName              { return []DepName{"c"} }
+func (t *testDepB) Name() DepName                   { return "b" }
+func (t *testDepB) Refs() []DepName                 { return []DepName{"c"} }
 func (t *testDepB) Get() any                        { return t.instance }
 func (t *testDepB) Close(ctx context.Context) error { t.instance = nil; return nil }
 
 type testDepC struct{ instance any }
 
-func (t *testDepC) Init(ctx context.Context, deps *Container) error {
+func (t *testDepC) Init(ctx context.Context, deps DependenciesStore) error {
 	t.instance = &C{}
 	return nil
 }
-func (t *testDepC) GetName() DepName                { return "c" }
-func (t *testDepC) GetRefs() []DepName              { return nil }
+func (t *testDepC) Name() DepName                   { return "c" }
+func (t *testDepC) Refs() []DepName                 { return nil }
 func (t *testDepC) Get() any                        { return t.instance }
 func (t *testDepC) Close(ctx context.Context) error { t.instance = nil; return nil }
 
 // package-scope helper types for error tests
 type missingDep struct{}
 
-func (m *missingDep) Init(ctx context.Context, deps *Container) error { return nil }
-func (m *missingDep) GetName() DepName                                { return "m" }
-func (m *missingDep) GetRefs() []DepName                              { return []DepName{"nope"} }
-func (m *missingDep) Get() any                                        { return nil }
-func (m *missingDep) Close(ctx context.Context) error                 { return nil }
+func (m *missingDep) Init(ctx context.Context, deps DependenciesStore) error { return nil }
+func (m *missingDep) Name() DepName                                          { return "m" }
+func (m *missingDep) Refs() []DepName                                        { return []DepName{"nope"} }
+func (m *missingDep) Get() any                                               { return nil }
+func (m *missingDep) Close(ctx context.Context) error                        { return nil }
 
 type depX struct{}
 
-func (x *depX) Init(ctx context.Context, deps *Container) error { return nil }
-func (x *depX) GetName() DepName                                { return "x" }
-func (x *depX) GetRefs() []DepName                              { return []DepName{"y"} }
-func (x *depX) Get() any                                        { return nil }
-func (x *depX) Close(ctx context.Context) error                 { return nil }
+func (x *depX) Init(ctx context.Context, deps DependenciesStore) error { return nil }
+func (x *depX) Name() DepName                                          { return "x" }
+func (x *depX) Refs() []DepName                                        { return []DepName{"y"} }
+func (x *depX) Get() any                                               { return nil }
+func (x *depX) Close(ctx context.Context) error                        { return nil }
 
 type depY struct{}
 
-func (y *depY) Init(ctx context.Context, deps *Container) error { return nil }
-func (y *depY) GetName() DepName                                { return "y" }
-func (y *depY) GetRefs() []DepName                              { return []DepName{"x"} }
-func (y *depY) Get() any                                        { return nil }
-func (y *depY) Close(ctx context.Context) error                 { return nil }
+func (y *depY) Init(ctx context.Context, deps DependenciesStore) error { return nil }
+func (y *depY) Name() DepName                                          { return "y" }
+func (y *depY) Refs() []DepName                                        { return []DepName{"x"} }
+func (y *depY) Get() any                                               { return nil }
+func (y *depY) Close(ctx context.Context) error                        { return nil }
 
 func TestDependencies_Add_Get_Require(t *testing.T) {
 	r := require.New(t)
-	d := New()
+	d := New(false)
 
 	// Add pointer values only (Add requires pointer Dep)
 	d.Add(&testDepA{}, &testDepB{}, &testDepC{})
@@ -124,15 +124,15 @@ func TestDependencies_Add_Get_Require(t *testing.T) {
 	r.NoError(d.Init(context.Background()), "Init failed")
 
 	// Get by key (returns prepared instance)
-	v, ok := d.Get("a")
-	r.True(ok, "expected to find key 'a'")
+	v, err := d.Get("a")
+	r.NoError(err, "expected to find key 'a'")
 
 	a, ok := v.(*A)
 	r.Truef(ok, "expected *A for key a, got: %T", v)
 	r.Equal("A", a.A(), "unexpected A.A() result")
 
-	v, ok = d.Get("b")
-	r.True(ok, "expected to find key 'b'")
+	v, err = d.Get("b")
+	r.NoError(err, "expected to find key 'b'")
 
 	// check B.B() result to verify dependency on C was injected
 	b, ok := v.(*B)
@@ -140,44 +140,45 @@ func TestDependencies_Add_Get_Require(t *testing.T) {
 	r.Equal("B + C", b.B(), "unexpected B.B() result")
 
 	// missing key
-	_, ok = d.Get("missing")
-	r.False(ok, "expected no value for 'missing'")
+	m, err := d.Get("missing")
+	r.EqualError(err, "dependency \"missing\" not initialized (lazyInit is disabled)", "expected error for 'missing'")
+	r.Nil(m, "expected nil for missing key")
 }
 
 func TestDependencies_WithNamedDep(t *testing.T) {
 	r := require.New(t)
-	d := New()
+	d := New(false)
 
 	// Add pointer values only (Add requires pointer Dep)
 	d.Add(
-		NewNamedDependency("a", nil, func(ctx context.Context, deps *Container) (any, error) { return &A{}, nil }, nil),
+		NewNamedDependency("a", nil, func(ctx context.Context, deps DependenciesStore) (any, error) { return &A{}, nil }, nil),
 		NewNamedDependency(
 			"b",
 			[]DepName{"c"},
-			func(ctx context.Context, deps *Container) (any, error) {
-				v, ok := deps.Get("c")
-				r.True(ok, "expected to find key 'c'")
+			func(ctx context.Context, deps DependenciesStore) (any, error) {
+				v, err := deps.Get("c")
+				r.NoError(err, "expected to find key 'c'")
 				c, ok := v.(*C)
 				r.Truef(ok, "expected *C for key c, got: %T", v)
 				return &B{c: c}, nil
 			},
 			nil,
 		),
-		NewNamedDependency("c", nil, func(ctx context.Context, deps *Container) (any, error) { return &C{}, nil }, nil),
+		NewNamedDependency("c", nil, func(ctx context.Context, deps DependenciesStore) (any, error) { return &C{}, nil }, nil),
 	)
 
 	// initialize dependencies first
 	r.NoError(d.Init(context.Background()), "Init failed")
 
 	// Get by key (returns prepared instance)
-	v, ok := d.Get("a")
-	r.True(ok, "expected to find key 'a'")
+	v, err := d.Get("a")
+	r.NoError(err, "expected to find key 'a'")
 	a, ok := v.(*A)
 	r.Truef(ok, "expected *A for key a, got: %T", v)
 	r.Equal("A", a.A(), "unexpected A.A() result")
 
-	v, ok = d.Get("b")
-	r.True(ok, "expected to find key 'b'")
+	v, err = d.Get("b")
+	r.NoError(err, "expected to find key 'b'")
 	b, ok := v.(*B)
 	r.Truef(ok, "expected *B for key b, got: %T", v)
 	r.Equal("B + C", b.B(), "unexpected B.B() result")
@@ -185,7 +186,7 @@ func TestDependencies_WithNamedDep(t *testing.T) {
 
 func TestDependencies_WithBaseDep(t *testing.T) {
 	r := require.New(t)
-	d := New()
+	d := New(false)
 
 	// Add pointer values only (Add requires pointer Dep)
 	// NewBaseDep receives onInit and onClose funcs
@@ -204,12 +205,12 @@ func TestDependencies_WithBaseDep(t *testing.T) {
 	r.NoError(d.Init(context.Background()), "Init failed")
 
 	// Get by type (returns prepared instance)
-	a, ok := GetByType[*A](d)
-	r.True(ok, "expected to find key 'a'")
+	a, err := GetByType[*A](d)
+	r.NoError(err, "expected to find key 'a'")
 	r.Equal("A", a.A(), "unexpected A.A() result")
 
-	b, ok := GetByType[*B](d)
-	r.True(ok, "expected to find key 'b'")
+	b, err := GetByType[*B](d)
+	r.NoError(err, "expected to find key 'b'")
 	// check B.B() result to verify dependency on C was injected
 	r.Equal("B + C", b.B(), "unexpected B.B() result")
 
@@ -229,7 +230,7 @@ func TestDependencies_WithBaseDep(t *testing.T) {
 
 func TestInitMissingDependency(t *testing.T) {
 	r := require.New(t)
-	d := New()
+	d := New(false)
 	// use package-scope helper type 'missingDep'
 	m := &missingDep{}
 	d.Add(m)
@@ -241,7 +242,7 @@ func TestInitMissingDependency(t *testing.T) {
 
 func TestInitCycleDetection(t *testing.T) {
 	r := require.New(t)
-	d := New()
+	d := New(false)
 	// use package-scope helper types 'depX' and 'depY'
 	dx := &depX{}
 	dy := &depY{}
@@ -250,11 +251,4 @@ func TestInitCycleDetection(t *testing.T) {
 	err := d.Init(context.Background())
 	r.Error(err)
 	r.Contains(err.Error(), "cycle detected")
-}
-
-func TestGetUnknownKey(t *testing.T) {
-	d := New()
-	if v, ok := d.Get("unknown"); ok || v != nil {
-		t.Fatalf("expected Get to return (nil,false) for unknown key, got: (%v,%v)", v, ok)
-	}
 }

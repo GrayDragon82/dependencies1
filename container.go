@@ -35,140 +35,159 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"sync"
 )
 
-// Container holds a map of dependency objects implementing Dep
+// Container stores all registered dependencies.
+// It is safe for concurrent reads (Get, Has, List), but writes (Add, Init, Close)
+// must not be concurrent and must happen before initialization is complete.
 type Container struct {
-	deps map[DepName]Dependency
-	// lastOrder holds the last successful initialization order so Close can
-	// reuse it without recomputing the topological order.
-	lastOrder []DepName
+	lazyInit bool // allow on-demand initialization
+
+	mu          sync.RWMutex
+	deps        map[DepName]Dependency
+	instances   map[DepName]any // cached initialized dependency instances
+	topoOrder   []DepName
+	initialized bool
+	closed      bool
 }
 
-// New creates a new Dependencies instance
-func New() *Container {
+// New creates a new Container instance.
+func New(lazyInit bool) *Container {
 	return &Container{
-		deps: make(map[DepName]Dependency),
+		deps:      make(map[DepName]Dependency),
+		instances: make(map[DepName]any),
+		lazyInit:  lazyInit,
 	}
 }
 
-// Add stores one or more dependencies. Each dependency is stored by its
-// GetName() and by its concrete type key. Each value must be a pointer;
-// passing a non-pointer will cause a panic.
-func (d *Container) Add(values ...Dependency) {
-	for _, value := range values {
-		rv := reflect.ValueOf(value)
-		if rv.Kind() != reflect.Ptr {
-			panic("Dependencies.Add: value must be a pointer")
+// Add stores one or more dependencies in the container.
+// It is forbidden to add dependencies after initialization.
+func (c *Container) Add(deps ...Dependency) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.initialized {
+		return fmt.Errorf("cannot add dependencies after initialization")
+	}
+	if c.closed {
+		return fmt.Errorf("cannot add dependencies after close")
+	}
+
+	for _, dep := range deps {
+		name := dep.Name()
+		if _, exists := c.deps[name]; exists {
+			return fmt.Errorf("dependency %q already exists", name)
 		}
-		d.deps[value.GetName()] = value
+		c.deps[name] = dep
 	}
+	return nil
 }
 
-// GetByType retrieves a dependency by its type T
-func GetByType[T any](d *Container) (T, bool) {
-	var zero T
-	typeKey := DepName(fmt.Sprintf("%T", zero))
-	if value, exists := d.Get(typeKey); exists {
-		return value.(T), true
+// Get retrieves a dependency by name.
+// Thread-safe, but cannot be called after full initialization is complete.
+func (c *Container) Get(name DepName) (any, error) {
+	c.mu.RLock()
+	instance, ok := c.instances[name]
+	c.mu.RUnlock()
+	if ok {
+		return instance, nil
 	}
-	return zero, false
-}
 
-// Get retrieves a dependency by key and returns the prepared instance (Dep.Get()).
-func (d *Container) Get(key DepName) (any, bool) {
-	dep, exists := d.deps[key]
+	if !c.lazyInit {
+		return nil, fmt.Errorf("dependency %q not initialized (lazyInit is disabled)", name)
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Double check again
+	if instance, ok = c.instances[name]; ok {
+		return instance, nil
+	}
+
+	dep, exists := c.deps[name]
 	if !exists {
-		return nil, false
+		return nil, fmt.Errorf("dependency %q not found", name)
 	}
-	return dep.Get(), true
+
+	// Call Init
+	if err := dep.Init(context.Background(), c); err != nil {
+		return nil, fmt.Errorf("failed to init dependency %q: %w", name, err)
+	}
+	instance = dep.Get()
+	c.instances[name] = instance
+	return instance, nil
 }
 
-func ReduceDependencies[R any](deps *Container) *R {
-	rDeps := new(R)
-	t := reflect.TypeOf(rDeps)
-	v := reflect.ValueOf(rDeps)
-	for i := 0; i < t.Elem().NumField(); i++ {
-		key := DepName(t.Elem().Field(i).Type.String())
-		val, found := deps.Get(key)
-		if found {
-			v.Elem().Field(i).Set(reflect.ValueOf(val))
-		}
-	}
-	return rDeps
+// Has checks if dependency exists (thread-safe).
+func (c *Container) Has(key DepName) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	_, exists := c.deps[key]
+	return exists
 }
 
-func MustReduceDependencies[R any](deps *Container) *R {
-	rDeps := new(R)
-	t := reflect.TypeOf(rDeps)
-	v := reflect.ValueOf(rDeps)
-	for i := 0; i < t.Elem().NumField(); i++ {
-		key := DepName(t.Elem().Field(i).Type.String())
-		val, found := deps.Get(key)
-		if !found {
-			panic(fmt.Sprintf("MustReduceDependencies: missing dependency %s", key))
-		}
-		v.Elem().Field(i).Set(reflect.ValueOf(val))
+// Init initializes all dependencies in topological order.
+// Marks container as initialized after success.
+func (c *Container) Init(ctx context.Context) error {
+	c.mu.Lock()
+	if c.initialized || c.closed {
+		c.mu.Unlock()
+		return fmt.Errorf("container already initialized or closed")
 	}
-	return rDeps
-}
+	c.initialized = true
+	c.mu.Unlock()
 
-// Init initializes all registered dependencies in an order that satisfies
-// their GetRefs() requirements (dependencies are initialized before
-// dependents). If initialization of any dependency fails, already
-// initialized dependencies are closed in reverse order.
-func (d *Container) Init(ctx context.Context) error {
-	order, err := d.topoOrder()
+	order, err := c.resolveOrder()
 	if err != nil {
 		return err
 	}
 
 	initialized := make([]DepName, 0, len(order))
 	for _, name := range order {
-		dep := d.deps[name]
-		if err := dep.Init(ctx, d); err != nil {
-			// attempt to close already-initialized in reverse order
+		dep := c.deps[name]
+		if err := dep.Init(ctx, c); err != nil {
+			// Rollback already initialized
 			for i := len(initialized) - 1; i >= 0; i-- {
-				_ = d.deps[initialized[i]].Close(ctx)
+				_ = c.deps[initialized[i]].Close(ctx)
 			}
-			return err
+			c.closed = true // prevent further use
+			return fmt.Errorf("init failed at %s: %w", name, err)
 		}
 		initialized = append(initialized, name)
+		c.instances[name] = dep.Get()
 	}
-	// record successful initialization order for faster Close
-	d.lastOrder = order
+
+	c.topoOrder = order
+	c.initialized = true
 	return nil
 }
 
-// Close closes all dependencies in reverse initialization order.
-func (d *Container) Close(ctx context.Context) error {
-	var order []DepName
-	if len(d.lastOrder) > 0 {
-		order = d.lastOrder
-	} else {
-		var err error
-		order, err = d.topoOrder()
-		if err != nil {
-			return err
-		}
+// Close shuts down dependencies in reverse order.
+func (c *Container) Close(ctx context.Context) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if !c.initialized {
+		return fmt.Errorf("container not initialized")
 	}
+
 	var firstErr error
-	for i := len(order) - 1; i >= 0; i-- {
-		name := order[i]
-		if err := d.deps[name].Close(ctx); err != nil && firstErr == nil {
+	for i := len(c.topoOrder) - 1; i >= 0; i-- {
+		name := c.topoOrder[i]
+		if err := c.deps[name].Close(ctx); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
-	// clear cached order after close
-	d.lastOrder = nil
+	c.initialized = false
+	c.closed = true
+	c.topoOrder = nil
 	return firstErr
 }
 
-// topoOrder performs a topological sort of dependencies based on GetRefs.
-// Returns an order where dependencies appear before dependents.
-func (d *Container) topoOrder() ([]DepName, error) {
-	// build adjacency using deps map
-	// states: 0=unvisited,1=visiting,2=done
+// resolveOrder computes the initialization order (topological sort).
+func (c *Container) resolveOrder() ([]DepName, error) {
 	state := make(map[DepName]int)
 	var order []DepName
 
@@ -183,12 +202,13 @@ func (d *Container) topoOrder() ([]DepName, error) {
 			}
 		}
 		state[n] = 1
-		dep, exists := d.deps[n]
+
+		dep, exists := c.deps[n]
 		if !exists {
-			return fmt.Errorf("unknown dependency: %s", n)
+			return fmt.Errorf("unknown dependency %s", n)
 		}
-		for _, ref := range dep.GetRefs() {
-			if _, ok := d.deps[ref]; !ok {
+		for _, ref := range dep.Refs() {
+			if _, ok := c.deps[ref]; !ok {
 				return fmt.Errorf("missing dependency %s required by %s", ref, n)
 			}
 			if err := visit(ref); err != nil {
@@ -200,7 +220,7 @@ func (d *Container) topoOrder() ([]DepName, error) {
 		return nil
 	}
 
-	for name := range d.deps {
+	for name := range c.deps {
 		if state[name] == 0 {
 			if err := visit(name); err != nil {
 				return nil, err
@@ -208,4 +228,44 @@ func (d *Container) topoOrder() ([]DepName, error) {
 		}
 	}
 	return order, nil
+}
+
+// GetByType retrieves a dependency by its type T
+func GetByType[T any](d DependenciesStore) (T, error) {
+	var zero T
+	typeKey := DepName(fmt.Sprintf("%T", zero))
+	value, err := d.Get(typeKey)
+	if err != nil {
+		return zero, err
+	}
+	return value.(T), nil
+}
+
+func ReduceDependencies[R any](deps DependenciesStore) *R {
+	rDeps := new(R)
+	t := reflect.TypeOf(rDeps)
+	v := reflect.ValueOf(rDeps)
+	for i := 0; i < t.Elem().NumField(); i++ {
+		key := DepName(t.Elem().Field(i).Type.String())
+		val, err := deps.Get(key)
+		if err == nil {
+			v.Elem().Field(i).Set(reflect.ValueOf(val))
+		}
+	}
+	return rDeps
+}
+
+func MustReduceDependencies[R any](deps DependenciesStore) *R {
+	rDeps := new(R)
+	t := reflect.TypeOf(rDeps)
+	v := reflect.ValueOf(rDeps)
+	for i := 0; i < t.Elem().NumField(); i++ {
+		key := DepName(t.Elem().Field(i).Type.String())
+		val, err := deps.Get(key)
+		if err != nil {
+			panic(fmt.Errorf("MustReduceDependencies: get dependency %q: %w", key, err))
+		}
+		v.Elem().Field(i).Set(reflect.ValueOf(val))
+	}
+	return rDeps
 }
