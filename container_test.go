@@ -237,7 +237,7 @@ func TestInitMissingDependency(t *testing.T) {
 
 	err := d.Init(context.Background())
 	r.Error(err)
-	r.Contains(err.Error(), "missing dependency nope required by m")
+	r.Contains(err.Error(), "missing dependency \"nope\" required by \"m\"")
 }
 
 func TestInitCycleDetection(t *testing.T) {

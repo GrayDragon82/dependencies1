@@ -47,7 +47,7 @@ type Container struct {
 	mu          sync.RWMutex
 	deps        map[DepName]Dependency
 	instances   map[DepName]any // cached initialized dependency instances
-	topoOrder   []DepName
+	initOrder   []DepName
 	initialized bool
 	closed      bool
 }
@@ -76,6 +76,9 @@ func (c *Container) Add(deps ...Dependency) error {
 
 	for _, dep := range deps {
 		name := dep.Name()
+		if name == "" {
+			return fmt.Errorf("dependency name cannot be empty")
+		}
 		if _, exists := c.deps[name]; exists {
 			return fmt.Errorf("dependency %q already exists", name)
 		}
@@ -98,11 +101,15 @@ func (c *Container) Get(name DepName) (any, error) {
 		return nil, fmt.Errorf("dependency %q not initialized (lazyInit is disabled)", name)
 	}
 
+	return c.lazyInitAndGet(name)
+}
+
+func (c *Container) lazyInitAndGet(name DepName) (any, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	// Double check again
-	if instance, ok = c.instances[name]; ok {
+	if instance, ok := c.instances[name]; ok {
 		return instance, nil
 	}
 
@@ -115,8 +122,9 @@ func (c *Container) Get(name DepName) (any, error) {
 	if err := dep.Init(context.Background(), c); err != nil {
 		return nil, fmt.Errorf("failed to init dependency %q: %w", name, err)
 	}
-	instance = dep.Get()
+	instance := dep.Get()
 	c.instances[name] = instance
+	c.initOrder = append(c.initOrder, name)
 	return instance, nil
 }
 
@@ -131,6 +139,10 @@ func (c *Container) Has(key DepName) bool {
 // Init initializes all dependencies in topological order.
 // Marks container as initialized after success.
 func (c *Container) Init(ctx context.Context) error {
+	if c.lazyInit {
+		return fmt.Errorf("cannot call Init when lazyInit is enabled")
+	}
+
 	c.mu.Lock()
 	if c.initialized || c.closed {
 		c.mu.Unlock()
@@ -146,6 +158,11 @@ func (c *Container) Init(ctx context.Context) error {
 
 	initialized := make([]DepName, 0, len(order))
 	for _, name := range order {
+		if _, ok := c.instances[name]; ok {
+			// already initialized
+			continue
+		}
+
 		dep := c.deps[name]
 		if err := dep.Init(ctx, c); err != nil {
 			// Rollback already initialized
@@ -153,13 +170,13 @@ func (c *Container) Init(ctx context.Context) error {
 				_ = c.deps[initialized[i]].Close(ctx)
 			}
 			c.closed = true // prevent further use
-			return fmt.Errorf("init failed at %s: %w", name, err)
+			return fmt.Errorf("init failed for dependency %q: %w", name, err)
 		}
 		initialized = append(initialized, name)
 		c.instances[name] = dep.Get()
 	}
 
-	c.topoOrder = order
+	c.initOrder = order
 	c.initialized = true
 	return nil
 }
@@ -174,15 +191,15 @@ func (c *Container) Close(ctx context.Context) error {
 	}
 
 	var firstErr error
-	for i := len(c.topoOrder) - 1; i >= 0; i-- {
-		name := c.topoOrder[i]
+	for i := len(c.initOrder) - 1; i >= 0; i-- {
+		name := c.initOrder[i]
 		if err := c.deps[name].Close(ctx); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
 	c.initialized = false
 	c.closed = true
-	c.topoOrder = nil
+	c.initOrder = nil
 	return firstErr
 }
 
@@ -195,7 +212,7 @@ func (c *Container) resolveOrder() ([]DepName, error) {
 	visit = func(n DepName) error {
 		if s, ok := state[n]; ok {
 			if s == 1 {
-				return fmt.Errorf("cycle detected at %s", n)
+				return fmt.Errorf("cycle detected at %q", n)
 			}
 			if s == 2 {
 				return nil
@@ -205,11 +222,11 @@ func (c *Container) resolveOrder() ([]DepName, error) {
 
 		dep, exists := c.deps[n]
 		if !exists {
-			return fmt.Errorf("unknown dependency %s", n)
+			return fmt.Errorf("unknown dependency %q", n)
 		}
 		for _, ref := range dep.Refs() {
 			if _, ok := c.deps[ref]; !ok {
-				return fmt.Errorf("missing dependency %s required by %s", ref, n)
+				return fmt.Errorf("missing dependency %q required by %q", ref, n)
 			}
 			if err := visit(ref); err != nil {
 				return err
