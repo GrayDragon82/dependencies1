@@ -258,31 +258,124 @@ func GetByType[T any](d DependenciesStore) (T, error) {
 	return value.(T), nil
 }
 
-func ReduceDependencies[R any](deps DependenciesStore) *R {
-	rDeps := new(R)
-	t := reflect.TypeOf(rDeps)
-	v := reflect.ValueOf(rDeps)
-	for i := 0; i < t.Elem().NumField(); i++ {
-		key := DepName(t.Elem().Field(i).Type.String())
-		val, err := deps.Get(key)
-		if err == nil {
-			v.Elem().Field(i).Set(reflect.ValueOf(val))
-		}
+// ReduceDependencies populates the fields of a struct R with dependency instances
+// from the given container.
+//
+// Each exported field of R is treated as a dependency:
+//   - If the field has a `dep:"<name>"` tag, that name is used to look up the dependency.
+//   - Otherwise, the dependency key is derived from the field's type string.
+//
+// Example:
+//
+//	type MyDeps struct {
+//	    DB    *sql.DB        `dep:"main_db"`
+//	    Cache *redis.Client  // lookup by type
+//	}
+//
+//	deps, err := ReduceDependencies[MyDeps](container)
+//
+// Returns (*R, error). Missing or duplicate dependencies are reported as errors.
+func reduceDependencies[R any](c *Container, skipErrors bool) (*R, error) {
+	var zero R
+	t := reflect.TypeOf(zero)
+	if t.Kind() != reflect.Struct {
+		return &zero, fmt.Errorf("ReduceDependencies: type %T is not a struct", zero)
 	}
+
+	v := reflect.New(t).Elem()
+	result := v
+
+	for i := 0; i < t.NumField(); i++ {
+		field := t.Field(i)
+
+		// Skip unexported fields
+		if !field.IsExported() {
+			continue
+		}
+
+		// Determine dependency key
+		depName := DepName(field.Tag.Get("dep"))
+		if depName == "" {
+			depName = DepName(field.Type.String())
+		}
+
+		instance, ok := c.instances[depName]
+		if !ok {
+			// Try lazy Get
+			var err error
+			instance, err = c.Get(depName)
+			if err != nil {
+				if skipErrors {
+					continue
+				}
+				return nil, fmt.Errorf(
+					"ReduceDependencies: missing dependency for field %q (%s): %w", field.Name, depName, err,
+				)
+			}
+		}
+
+		// Fill the field
+		fv := result.Field(i)
+		if !fv.CanSet() {
+			if skipErrors {
+				continue
+			}
+			return nil, fmt.Errorf("ReduceDependencies: field %q cannot be set", field.Name)
+		}
+		fv.Set(reflect.ValueOf(instance))
+	}
+
+	final := result.Addr().Interface().(*R)
+	return final, nil
+}
+
+// ReduceDependencies populates the fields of a struct R with dependency instances
+// from the given container.
+//
+// Each exported field of R is treated as a dependency:
+//   - If the field has a `dep:"<name>"` tag, that name is used to look up the dependency.
+//   - Otherwise, the dependency key is derived from the field's type string.
+//
+// Example:
+//
+//		type MyDeps struct {
+//		    DB    *sql.DB        `dep:"main_db"`
+//		    Cache *redis.Client  // lookup by type
+//		}
+//
+//	 	func MyFunc(deps *MyDeps) {...}
+//
+//		MyFunc(ReduceDependencies[MyDeps](container))
+//
+// Missing dependencies and private fields are ignored.
+func ReduceDependencies[R any](deps DependenciesStore) *R {
+	rDeps, _ := reduceDependencies[R](deps.(*Container), true)
 	return rDeps
 }
 
+// MustReduceDependencies populates the fields of a struct R with dependency instances
+// from the given container.
+//
+// Each exported field of R is treated as a dependency:
+//   - If the field has a `dep:"<name>"` tag, that name is used to look up the dependency.
+//   - Otherwise, the dependency key is derived from the field's type string.
+//
+// Example:
+//
+//		type MyDeps struct {
+//		    DB    *sql.DB        `dep:"main_db"`
+//		    Cache *redis.Client  // lookup by type
+//		}
+//
+//	 	func MyFunc(deps *MyDeps) {...}
+//
+//		MyFunc(MustReduceDependencies[MyDeps](container))
+//
+// Missing dependencies and private fields leads to panic.
 func MustReduceDependencies[R any](deps DependenciesStore) *R {
-	rDeps := new(R)
-	t := reflect.TypeOf(rDeps)
-	v := reflect.ValueOf(rDeps)
-	for i := 0; i < t.Elem().NumField(); i++ {
-		key := DepName(t.Elem().Field(i).Type.String())
-		val, err := deps.Get(key)
-		if err != nil {
-			panic(fmt.Errorf("MustReduceDependencies: get dependency %q: %w", key, err))
-		}
-		v.Elem().Field(i).Set(reflect.ValueOf(val))
+	rDeps, err := reduceDependencies[R](deps.(*Container), false)
+	if err != nil {
+		panic(err)
 	}
 	return rDeps
 }
