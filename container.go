@@ -44,20 +44,22 @@ import (
 type Container struct {
 	lazyInit bool // allow on-demand initialization
 
-	mu          sync.RWMutex
-	deps        map[DepName]Dependency
-	instances   map[DepName]any // cached initialized dependency instances
-	initOrder   []DepName
-	initialized bool
-	closed      bool
+	mu               sync.RWMutex
+	depsInitializing map[DepName]bool // track initializing dependencies for lazy init
+	deps             map[DepName]Dependency
+	instances        map[DepName]any // cached initialized dependency instances
+	initOrder        []DepName
+	initialized      bool
+	closed           bool
 }
 
 // New creates a new Container instance.
 func New(lazyInit bool) *Container {
 	return &Container{
-		deps:      make(map[DepName]Dependency),
-		instances: make(map[DepName]any),
-		lazyInit:  lazyInit,
+		depsInitializing: make(map[DepName]bool),
+		deps:             make(map[DepName]Dependency),
+		instances:        make(map[DepName]any),
+		lazyInit:         lazyInit,
 	}
 }
 
@@ -83,6 +85,9 @@ func (c *Container) Add(deps ...Dependency) error {
 			return fmt.Errorf("dependency %q already exists", name)
 		}
 		c.deps[name] = dep
+		if c.lazyInit {
+			c.depsInitializing[name] = false
+		}
 	}
 	return nil
 }
@@ -97,32 +102,54 @@ func (c *Container) Get(name DepName) (any, error) {
 		return instance, nil
 	}
 
-	if !c.lazyInit {
-		return nil, fmt.Errorf("dependency %q not initialized (lazyInit is disabled)", name)
+	if c.lazyInit {
+		return c.lazyInitAndGet(name)
 	}
 
-	return c.lazyInitAndGet(name)
+	return nil, fmt.Errorf("dependency %q not initialized (lazyInit is disabled)", name)
 }
 
-func (c *Container) lazyInitAndGet(name DepName) (any, error) {
+func (c *Container) getInstanceOrGetForLazyInit(name DepName) (any, Dependency, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	// Double check again
 	if instance, ok := c.instances[name]; ok {
-		return instance, nil
+		return instance, nil, nil
 	}
 
 	dep, exists := c.deps[name]
 	if !exists {
-		return nil, fmt.Errorf("dependency %q not found", name)
+		return nil, nil, fmt.Errorf("dependency %q not found", name)
+	}
+
+	c.depMus[name].Lock()
+
+	return nil, dep, nil
+}
+
+func (c *Container) lazyInitAndGet(name DepName) (any, error) {
+	instance, dep, err := c.getInstanceOrGetForLazyInit(name)
+	if err != nil {
+		return nil, err
+	}
+	if instance != nil {
+		return instance, nil
+	}
+	defer c.depMus[name].Unlock()
+
+	// init if required all dependencies first
+	for _, ref := range dep.Refs() {
+		if _, err = c.Get(ref); err != nil {
+			return nil, fmt.Errorf("failed to init dependency %q required by %q: %w", ref, name, err)
+		}
 	}
 
 	// Call Init
-	if err := dep.Init(context.Background(), c); err != nil {
+	if err = dep.Init(context.Background(), c); err != nil {
 		return nil, fmt.Errorf("failed to init dependency %q: %w", name, err)
 	}
-	instance := dep.Get()
+	instance = dep.Get()
 	c.instances[name] = instance
 	c.initOrder = append(c.initOrder, name)
 	return instance, nil
@@ -164,7 +191,7 @@ func (c *Container) Init(ctx context.Context) error {
 		}
 
 		dep := c.deps[name]
-		if err := dep.Init(ctx, c); err != nil {
+		if err = dep.Init(ctx, c); err != nil {
 			// Rollback already initialized
 			for i := len(initialized) - 1; i >= 0; i-- {
 				_ = c.deps[initialized[i]].Close(ctx)
@@ -186,7 +213,7 @@ func (c *Container) Close(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if !c.initialized {
+	if !c.initialized && !c.lazyInit {
 		return fmt.Errorf("container not initialized")
 	}
 

@@ -470,27 +470,27 @@ func TestLazyInit_BasicGet(t *testing.T) {
 	r.True(d.Has("c"), "Dependency 'c' should be registered")
 
 	// Get should trigger lazy initialization
-	v, err := d.Get("a")
+	vA, err := d.Get("a")
 	r.NoError(err, "Lazy init should succeed for 'a'")
-	r.NotNil(v, "Instance should not be nil")
+	r.NotNil(vA, "Instance should not be nil")
 
-	a, ok := v.(*A)
+	a, ok := vA.(*A)
 	r.True(ok, "Should be *A type")
 	r.Equal("A", a.A(), "A should work correctly")
 
 	// Get second dependency
-	v, err = d.Get("b")
+	vB, err := d.Get("b")
 	r.NoError(err, "Lazy init should succeed for 'c'")
-	r.NotNil(v, "Instance should not be nil")
+	r.NotNil(vB, "Instance should not be nil")
 
-	b, ok := v.(*B)
+	b, ok := vB.(*B)
 	r.True(ok, "Should be *B type")
-	r.Equal("B+C", b.B(), "B should work correctly")
+	r.Equal("B + C", b.B(), "B should work correctly")
 
 	// Getting again should return cached instance
-	v2, err := d.Get("a")
+	vA2, err := d.Get("a")
 	r.NoError(err, "Second Get should succeed")
-	r.Same(v, v2, "Should return same cached instance")
+	r.Same(vA, vA2, "Should return same cached instance")
 }
 
 // TestLazyInit_WithDependencies tests lazy initialization with dependencies
@@ -543,7 +543,7 @@ func TestLazyInit_MissingDependency(t *testing.T) {
 	// Get should fail because required dependency is missing
 	_, err := d.Get("m")
 	r.Error(err, "Get should fail for missing required dependency")
-	r.Contains(err.Error(), "failed to init dependency")
+	r.EqualError(err, "failed to init dependency \"nope\" required by \"m\": dependency \"nope\" not found")
 }
 
 // TestLazyInit_ConcurrentGet tests concurrent access with lazy initialization
